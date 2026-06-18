@@ -1,1 +1,14 @@
-web: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+# Supabase
+SUPABASE_URL=https://xxxxxxxx.supabase.co
+SUPABASE_SERVICE_KEY=service_role_key_her          # server-side ONLY, aldrig i frontend
+SUPABASE_JWT_SECRET=din_jwt_secret_her             # Settings > API > JWT Secret (HS256)
+
+# RankedIn (udfyld host/endpoints efter DevTools-capture)
+RANKEDIN_BASE_URL=https://api.rankedin.com
+RANKEDIN_PLAYER_ID=R000169277
+
+# CORS — frontend-origins, komma-separeret
+CORS_ORIGINS=http://localhost:5173,https://padelpit.dk
+
+# Admin-jobs (sync). Sæt en hemmelig værdi og kald sync med denne header.
+SYNC_SECRET=skift_mig
