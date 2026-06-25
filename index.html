@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="da">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0A1110" />
+  <title>PADELPIT</title>
+  <style>
+    html,body,#root{margin:0;padding:0;min-height:100dvh;background:#0A1110;}
+    /* boot-skærm mens React/Babel loader */
+    #boot{position:fixed;inset:0;display:grid;place-items:center;background:#0A1110;color:#1BB79E;
+      font-family:system-ui,sans-serif;font-size:13px;letter-spacing:.2em;text-transform:uppercase;}
+  </style>
+</head>
+<body>
+  <div id="root"><div id="boot">PADELPIT</div></div>
+
+  <!-- Babel transpilerer JSX i browseren (ingen build) -->
+  <script src="https://unpkg.com/@babel/standalone@7.25.6/babel.min.js"></script>
+
+  <script type="text/babel" data-type="module" data-presets="react">
+    import React, { useCallback, useEffect, useMemo, useState } from "https://esm.sh/react@18.3.1";
+    import { createRoot } from "https://esm.sh/react-dom@18.3.1/client?deps=react@18.3.1";
+    import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+
+    /* ============================================================ KONFIG
+       Udfyld din anon-key én gang. Den er offentlig (designet til frontend),
+       så det er trygt at have den her i en lukket klub-app.
+       Supabase → Settings → API Keys → "anon / public".
+    */
+    const CONFIG = {
+      SUPABASE_URL: "https://tmapurvnonpsaqfejtrb.supabase.co",
+      SUPABASE_ANON_KEY: "PASTE_DIN_ANON_KEY_HER",
+      API_BASE: "", // tom = samme domæne (Railway serverer både API og dette site)
+    };
+
+    const keyReady = CONFIG.SUPABASE_ANON_KEY && !CONFIG.SUPABASE_ANON_KEY.startsWith("PASTE");
+    const supabase = keyReady
+      ? createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY, {
+          auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false },
+        })
+      : null;
+
+    /* ============================================================ API-lag */
+    async function apiFetch(path, { method = "GET", body } = {}) {
+      const { data } = await supabase.auth.getSession();
+      const token = data?.session?.access_token;
+      const res = await fetch((CONFIG.API_BASE || "") + path, {
+        method,
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: body != null ? JSON.stringify(body) : undefined,
+      });
+      if (!res.ok) {
+        let detail;
+        try { detail = (await res.json())?.detail; } catch {}
+        throw new Error(detail || `Serverfejl (${res.status})`);
+      }
+      if (res.status === 204) return null;
+      return res.json();
+    }
+
+    const api = {
+      me: () => apiFetch("/players/me"),
+      events: () => apiFetch("/events"),
+      createEvent: (b) => apiFetch("/events", { method: "POST", body: b }),
+      rsvp: (id, status) => apiFetch(`/events/${id}/rsvp`, { method: "PUT", body: { status } }),
+      rankings: () => apiFetch("/players/rankings"),
+      fixtures: () => apiFetch("/league/fixtures"),
+      results: () => apiFetch("/league/results"),
+      dues: () => apiFetch("/dues/current"),
+      markPaid: (id, ref) => apiFetch(`/dues/${id}/pay`, { method: "POST", body: { mobilepay_ref: ref || null } }),
+      syncStatus: () => apiFetch("/rankedin/status"),
+      signup: (b) =>
+        fetch((CONFIG.API_BASE || "") + "/auth/signup", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(b),
+        }).then(async (r) => {
+          if (!r.ok) {
+            let d; try { d = (await r.json())?.detail; } catch {}
+            throw new Error(d || `Kunne ikke oprette (${r.status})`);
+          }
+          return r.json();
+        }),
+    };
+
+    /* ============================================================ format */
+    const dtf = new Intl.DateTimeFormat("da-DK", {
+      weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
+      timeZone: "Europe/Copenhagen",
+    });
+    const fmtDateTime = (iso) => {
+      if (!iso) return "—";
+      const d = new Date(iso);
+      return isNaN(d) ? String(iso) : dtf.format(d).replace(".", "");
+    };
+    const fmtKr = (ore) =>
+      new Intl.NumberFormat("da-DK", { style: "currency", currency: "DKK", maximumFractionDigits: ore % 100 ? 2 : 0 })
+        .format((ore || 0) / 100);
+
+    const EVENT_LABEL = { training: "Træning", match: "Kamp", league: "Liga" };
+    const RSVP_LABEL = { in: "Med", maybe: "Måske", out: "Afbud" };
+
+    /* ============================================================ styles */
+    const CSS = `
+@import url('https://fonts.googleapis.com/css2?family=Anton&family=Inter:wght@400;500;600;700;800&display=swap');
+.pp-root{--bg:#0A1110;--surface:#101E1A;--raised:#15271F;--line:#1E332D;--teal:#1BB79E;--teal-deep:#0E5C53;
+  --ball:#D8F24B;--text:#ECF3F0;--muted:#7E938D;--danger:#FF6F6F;color:var(--text);background:var(--bg);
+  font-family:Inter,system-ui,sans-serif;-webkit-font-smoothing:antialiased;min-height:100dvh;}
+.pp-root *{box-sizing:border-box;}
+.pp-shell{max-width:480px;margin:0 auto;min-height:100dvh;position:relative;
+  background:radial-gradient(120% 60% at 50% -10%,rgba(27,183,158,.10),transparent 60%),var(--bg);
+  display:flex;flex-direction:column;}
+.pp-top{position:sticky;top:0;z-index:20;display:flex;align-items:center;justify-content:space-between;
+  padding:calc(env(safe-area-inset-top) + 14px) 18px 14px;background:rgba(10,17,16,.82);
+  backdrop-filter:blur(12px);border-bottom:1px solid var(--line);}
+.pp-mark{font-family:Anton,sans-serif;font-size:24px;letter-spacing:.06em;line-height:1;text-transform:uppercase;
+  display:flex;align-items:center;gap:5px;}
+.pp-mark .t{color:var(--teal);}
+.pp-ball{width:9px;height:9px;border-radius:50%;background:var(--ball);box-shadow:0 0 10px rgba(216,242,75,.55);display:inline-block;}
+.pp-avatar{width:38px;height:38px;border-radius:50%;border:1px solid var(--line);background:var(--raised);
+  font-family:Anton,sans-serif;font-size:15px;letter-spacing:.04em;color:var(--teal);display:grid;place-items:center;cursor:pointer;}
+.pp-main{flex:1;padding:20px 18px 110px;}
+.pp-eyebrow{display:flex;align-items:center;gap:9px;text-transform:uppercase;letter-spacing:.18em;
+  font-size:11px;font-weight:700;color:var(--muted);margin:0 0 14px;}
+.pp-eyebrow::before{content:"";width:22px;height:2px;background:var(--teal);position:relative;}
+.pp-eyebrow .tick{width:5px;height:5px;background:var(--ball);border-radius:50%;margin-left:-13px;}
+.pp-h1{font-family:Anton,sans-serif;font-size:30px;line-height:1;letter-spacing:.02em;text-transform:uppercase;margin:0 0 18px;}
+.pp-card{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:16px;margin-bottom:12px;animation:rise .35s ease both;}
+@keyframes rise{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:none;}}
+.pp-row{display:flex;align-items:center;justify-content:space-between;gap:12px;}
+.pp-chip{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;padding:4px 9px;border-radius:999px;border:1px solid var(--line);color:var(--muted);}
+.pp-chip.training{color:#7FD7C9;border-color:#1d4a44;}
+.pp-chip.match{color:var(--ball);border-color:#4a4d1d;}
+.pp-chip.league{color:#9db4ff;border-color:#26305a;}
+.pp-chip.synced{color:var(--teal);border-color:var(--teal-deep);}
+.pp-muted{color:var(--muted);font-size:13px;}
+.pp-title{font-weight:700;font-size:17px;line-height:1.2;}
+.pp-seg{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:14px;}
+.pp-seg button{appearance:none;border:1px solid var(--line);background:var(--raised);color:var(--muted);border-radius:11px;
+  padding:11px 0;font-weight:700;font-size:13px;font-family:inherit;cursor:pointer;transition:transform .12s,background .15s,color .15s,border-color .15s;}
+.pp-seg button:active{transform:scale(.96);}
+.pp-seg button .n{display:block;font-size:11px;font-weight:600;opacity:.7;margin-top:2px;}
+.pp-seg button.on-in{background:rgba(27,183,158,.16);border-color:var(--teal);color:var(--teal);}
+.pp-seg button.on-maybe{background:rgba(216,242,75,.13);border-color:var(--ball);color:var(--ball);}
+.pp-seg button.on-out{background:rgba(255,111,111,.12);border-color:var(--danger);color:var(--danger);}
+.pp-rank{display:flex;align-items:center;gap:14px;padding:13px 14px;border:1px solid var(--line);border-radius:14px;margin-bottom:8px;background:var(--surface);}
+.pp-rank.me{border-color:var(--ball);background:linear-gradient(90deg,rgba(216,242,75,.10),transparent 70%);}
+.pp-pos{font-family:Anton,sans-serif;font-size:20px;width:30px;text-align:center;color:var(--muted);}
+.pp-rank.me .pp-pos{color:var(--ball);}
+.pp-rank .grow{flex:1;min-width:0;}
+.pp-rank .nm{font-weight:700;font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:flex;align-items:center;gap:7px;}
+.pp-pts{font-family:Anton,sans-serif;font-size:19px;letter-spacing:.02em;}
+.pp-wl{font-size:12px;color:var(--muted);}
+.pp-btn{appearance:none;width:100%;border-radius:13px;padding:15px;font-family:inherit;font-weight:700;font-size:15px;cursor:pointer;border:1px solid transparent;transition:transform .12s,opacity .15s;}
+.pp-btn:active{transform:scale(.98);}
+.pp-btn:disabled{opacity:.5;cursor:default;}
+.pp-btn.primary{background:var(--ball);color:#13160a;}
+.pp-btn.ghost{background:transparent;border-color:var(--line);color:var(--text);}
+.pp-btn.teal{background:var(--teal);color:#04201c;}
+.pp-field{margin-bottom:13px;}
+.pp-field label{display:block;font-size:12px;font-weight:600;color:var(--muted);margin-bottom:6px;letter-spacing:.02em;}
+.pp-input,.pp-select{width:100%;background:var(--raised);border:1px solid var(--line);border-radius:12px;padding:14px;color:var(--text);font-family:inherit;font-size:15px;}
+.pp-input:focus,.pp-select:focus{outline:none;border-color:var(--teal);}
+.pp-nav{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:480px;z-index:30;
+  display:grid;grid-template-columns:repeat(4,1fr);padding:8px 8px calc(env(safe-area-inset-bottom) + 8px);
+  background:rgba(13,22,20,.92);backdrop-filter:blur(14px);border-top:1px solid var(--line);}
+.pp-nav button{appearance:none;background:none;border:none;color:var(--muted);font-family:inherit;font-size:11px;font-weight:600;
+  cursor:pointer;padding:7px 0 4px;display:flex;flex-direction:column;align-items:center;gap:5px;position:relative;}
+.pp-nav button.on{color:var(--text);}
+.pp-nav .ico{width:22px;height:22px;}
+.pp-nav button.on .dot{position:absolute;top:-2px;width:5px;height:5px;border-radius:50%;background:var(--ball);box-shadow:0 0 8px rgba(216,242,75,.6);}
+.pp-center{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:60px 24px;text-align:center;}
+.pp-spin{width:30px;height:30px;border-radius:50%;border:3px solid var(--line);border-top-color:var(--teal);animation:spin .8s linear infinite;}
+@keyframes spin{to{transform:rotate(360deg);}}
+.pp-err{background:rgba(255,111,111,.1);border:1px solid rgba(255,111,111,.4);color:#ffb3b3;border-radius:12px;padding:12px 14px;font-size:14px;margin-bottom:12px;}
+.pp-empty{color:var(--muted);font-size:14px;}
+.pp-empty b{color:var(--text);display:block;font-size:16px;margin-bottom:4px;}
+.pp-auth{flex:1;display:flex;flex-direction:column;justify-content:center;padding:34px 26px calc(env(safe-area-inset-bottom) + 26px);}
+.pp-auth .big{font-family:Anton,sans-serif;font-size:54px;line-height:.9;letter-spacing:.03em;text-transform:uppercase;margin:0 0 6px;}
+.pp-auth .big .t{color:var(--teal);}
+.pp-court{height:3px;background:var(--teal);width:64px;border-radius:2px;margin:14px 0 30px;position:relative;}
+.pp-court::after{content:"";position:absolute;right:-3px;top:-2.5px;width:8px;height:8px;border-radius:50%;background:var(--ball);}
+.pp-tabs{display:flex;gap:6px;margin-bottom:22px;background:var(--raised);border:1px solid var(--line);border-radius:12px;padding:5px;}
+.pp-tabs button{flex:1;border:none;background:none;color:var(--muted);font-family:inherit;font-weight:700;font-size:14px;padding:10px;border-radius:8px;cursor:pointer;}
+.pp-tabs button.on{background:var(--surface);color:var(--text);}
+.pp-link{background:none;border:none;color:var(--teal);font-family:inherit;font-size:14px;cursor:pointer;padding:0;}
+.pp-scrim{position:fixed;inset:0;z-index:40;background:rgba(4,8,7,.6);backdrop-filter:blur(3px);display:flex;align-items:flex-end;justify-content:center;animation:fade .2s ease;}
+@keyframes fade{from{opacity:0;}to{opacity:1;}}
+.pp-sheet{width:100%;max-width:480px;background:var(--surface);border:1px solid var(--line);border-radius:22px 22px 0 0;
+  padding:22px 20px calc(env(safe-area-inset-bottom) + 22px);animation:up .28s cubic-bezier(.2,.8,.2,1);}
+@keyframes up{from{transform:translateY(100%);}to{transform:none;}}
+.pp-handle{width:42px;height:4px;border-radius:2px;background:var(--line);margin:0 auto 18px;}
+.pp-stat{display:flex;gap:10px;margin:16px 0;}
+.pp-stat>div{flex:1;background:var(--raised);border:1px solid var(--line);border-radius:13px;padding:13px;text-align:center;}
+.pp-stat .v{font-family:Anton,sans-serif;font-size:24px;}
+.pp-stat .l{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-top:2px;}
+.pp-badge{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--ball);
+  border:1px solid #4a4d1d;border-radius:999px;padding:3px 9px;margin-left:8px;vertical-align:middle;}
+@media (prefers-reduced-motion:reduce){.pp-card,.pp-scrim,.pp-sheet{animation:none!important;}.pp-spin{animation-duration:1.4s;}}
+`;
+
+    /* ============================================================ pieces */
+    const Spinner = () => <div className="pp-center"><div className="pp-spin" /></div>;
+
+    const ErrorBox = ({ msg, onRetry }) =>
+      msg ? (
+        <div className="pp-err">
+          {msg}
+          {onRetry && <button className="pp-link" style={{ display: "block", marginTop: 8 }} onClick={onRetry}>Prøv igen</button>}
+        </div>
+      ) : null;
+
+    const Empty = ({ title, sub }) => (
+      <div className="pp-center"><div className="pp-empty"><b>{title}</b>{sub}</div></div>
+    );
+
+    const Ico = {
+      events: (p) => (<svg className="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" {...p}><rect x="3" y="4" width="18" height="17" rx="2" /><path d="M3 9h18M8 2v4M16 2v4" /></svg>),
+      rank: (p) => (<svg className="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" {...p}><path d="M6 20V10M12 20V4M18 20v-7" /></svg>),
+      league: (p) => (<svg className="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" {...p}><circle cx="12" cy="12" r="9" /><path d="M12 3v18M3 12h18" /></svg>),
+      dues: (p) => (<svg className="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" {...p}><rect x="2" y="6" width="20" height="13" rx="2" /><path d="M2 10h20M6 15h4" /></svg>),
+    };
+
+    function useLoad(fn, deps = []) {
+      const [state, setState] = useState({ loading: true, error: null, data: null });
+      const run = useCallback(() => {
+        setState((s) => ({ ...s, loading: true, error: null }));
+        fn().then((data) => setState({ loading: false, error: null, data }))
+            .catch((e) => setState({ loading: false, error: e.message || "Noget gik galt", data: null }));
+      }, deps);
+      useEffect(run, [run]);
+      return { ...state, reload: run };
+    }
+
+    /* ----------------------------------------------------- Events */
+    function EventsView({ me }) {
+      const { loading, error, data, reload } = useLoad(api.events, []);
+      const [busy, setBusy] = useState(null);
+      const [showCreate, setShowCreate] = useState(false);
+      const onRsvp = async (ev, status) => {
+        setBusy(ev.id);
+        try { await api.rsvp(ev.id, status); await reload(); }
+        catch (e) { alert(e.message); }
+        finally { setBusy(null); }
+      };
+      return (
+        <>
+          <p className="pp-eyebrow"><span className="tick" />Klubben</p>
+          <h1 className="pp-h1">Kommende</h1>
+          {me?.is_admin && (
+            <button className="pp-btn ghost" style={{ marginBottom: 16 }} onClick={() => setShowCreate((s) => !s)}>
+              {showCreate ? "Luk" : "+ Opret event"}
+            </button>
+          )}
+          {showCreate && <CreateEvent onDone={() => { setShowCreate(false); reload(); }} />}
+          <ErrorBox msg={error} onRetry={reload} />
+          {loading ? <Spinner />
+            : !data?.length ? <Empty title="Ingen events endnu" sub="Næste træning eller kamp dukker op her, så snart en admin opretter den." />
+            : data.map((ev) => (
+                <div className="pp-card" key={ev.id}>
+                  <div className="pp-row">
+                    <span className={`pp-chip ${ev.type}`}>{EVENT_LABEL[ev.type] || ev.type}</span>
+                    {ev.synced && <span className="pp-chip synced">RankedIn</span>}
+                  </div>
+                  <div className="pp-title" style={{ marginTop: 10 }}>{ev.title}</div>
+                  <div className="pp-muted" style={{ marginTop: 4 }}>
+                    {fmtDateTime(ev.starts_at)}{ev.location ? ` · ${ev.location}` : ""}
+                  </div>
+                  <div className="pp-seg">
+                    {["in", "maybe", "out"].map((st) => (
+                      <button key={st} disabled={busy === ev.id} className={ev.my_status === st ? `on-${st}` : ""} onClick={() => onRsvp(ev, st)}>
+                        {RSVP_LABEL[st]}<span className="n">{ev.counts?.[st] ?? 0}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+        </>
+      );
+    }
+
+    function CreateEvent({ onDone }) {
+      const [f, setF] = useState({ type: "training", title: "", starts_at: "", location: "" });
+      const [saving, setSaving] = useState(false);
+      const [err, setErr] = useState(null);
+      const set = (k) => (e) => setF((s) => ({ ...s, [k]: e.target.value }));
+      const submit = async () => {
+        setErr(null);
+        if (!f.title.trim() || !f.starts_at) return setErr("Titel og tidspunkt skal udfyldes.");
+        setSaving(true);
+        try { await api.createEvent({ ...f, starts_at: new Date(f.starts_at).toISOString(), location: f.location || null }); onDone(); }
+        catch (e) { setErr(e.message); }
+        finally { setSaving(false); }
+      };
+      return (
+        <div className="pp-card">
+          <ErrorBox msg={err} />
+          <div className="pp-field"><label>Type</label>
+            <select className="pp-select" value={f.type} onChange={set("type")}>
+              <option value="training">Træning</option><option value="match">Kamp</option><option value="league">Liga</option>
+            </select>
+          </div>
+          <div className="pp-field"><label>Titel</label><input className="pp-input" value={f.title} onChange={set("title")} placeholder="Tirsdagstræning" /></div>
+          <div className="pp-field"><label>Tidspunkt</label><input className="pp-input" type="datetime-local" value={f.starts_at} onChange={set("starts_at")} /></div>
+          <div className="pp-field"><label>Sted (valgfrit)</label><input className="pp-input" value={f.location} onChange={set("location")} placeholder="Padelpit Hal 3" /></div>
+          <button className="pp-btn teal" disabled={saving} onClick={submit}>{saving ? "Opretter…" : "Opret event"}</button>
+        </div>
+      );
+    }
+
+    /* ----------------------------------------------------- Rangliste */
+    function RankingsView() {
+      const { loading, error, data, reload } = useLoad(api.rankings, []);
+      return (
+        <>
+          <p className="pp-eyebrow"><span className="tick" />Klubben</p>
+          <h1 className="pp-h1">Rangliste</h1>
+          <ErrorBox msg={error} onRetry={reload} />
+          {loading ? <Spinner />
+            : !data?.length ? <Empty title="Ingen point endnu" sub="Ranglisten fyldes, når RankedIn-synkroniseringen kører første gang." />
+            : data.map((r) => (
+                <div className={`pp-rank ${r.is_me ? "me" : ""}`} key={r.id}>
+                  <div className="pp-pos">{r.pos}</div>
+                  <div className="grow">
+                    <div className="nm">{r.full_name}{r.is_me && <span className="pp-ball" />}</div>
+                    <div className="pp-wl">{r.wins}–{r.losses} (V–N)</div>
+                  </div>
+                  <div className="pp-pts">{r.ranking_points}</div>
+                </div>
+              ))}
+        </>
+      );
+    }
+
+    /* ----------------------------------------------------- Liga */
+    function leagueLine(row) {
+      const home = row.home_team || row.home || row.team_home;
+      const away = row.away_team || row.away || row.team_away;
+      if (home && away) return `${home} – ${away}`;
+      return row.title || row.name || row.opponent || row.round || "Liga-kamp";
+    }
+    function leagueScore(row) {
+      const h = row.home_score ?? row.score_home;
+      const a = row.away_score ?? row.score_away;
+      if (h != null && a != null) return `${h} – ${a}`;
+      return row.result || null;
+    }
+    function LeagueView() {
+      const [tab, setTab] = useState("fixtures");
+      const { loading, error, data, reload } = useLoad(() => (tab === "fixtures" ? api.fixtures() : api.results()), [tab]);
+      return (
+        <>
+          <p className="pp-eyebrow"><span className="tick" />Klubben</p>
+          <h1 className="pp-h1">Liga</h1>
+          <div className="pp-tabs" style={{ marginBottom: 18 }}>
+            <button className={tab === "fixtures" ? "on" : ""} onClick={() => setTab("fixtures")}>Program</button>
+            <button className={tab === "results" ? "on" : ""} onClick={() => setTab("results")}>Resultater</button>
+          </div>
+          <ErrorBox msg={error} onRetry={reload} />
+          {loading ? <Spinner />
+            : !data?.length ? <Empty title={tab === "fixtures" ? "Ingen kommende kampe" : "Ingen resultater endnu"} sub={tab === "fixtures" ? "Holdkampe vises her, når de er planlagt." : "Spillede kampe lander her bagefter."} />
+            : data.map((row, i) => {
+                const score = leagueScore(row);
+                return (
+                  <div className="pp-card" key={row.id ?? i}>
+                    <div className="pp-row">
+                      <span className="pp-title">{leagueLine(row)}</span>
+                      {score && <span className="pp-pts" style={{ fontSize: 18 }}>{score}</span>}
+                    </div>
+                    <div className="pp-muted" style={{ marginTop: 4 }}>{fmtDateTime(row.starts_at)}{row.location ? ` · ${row.location}` : ""}</div>
+                  </div>
+                );
+              })}
+        </>
+      );
+    }
+
+    /* ----------------------------------------------------- Kontingent */
+    function DuesView() {
+      const { loading, error, data, reload } = useLoad(api.dues, []);
+      const [paying, setPaying] = useState(false);
+      const markPaid = async () => {
+        if (!data?.due) return;
+        setPaying(true);
+        try { await api.markPaid(data.due.id); await reload(); }
+        catch (e) { alert(e.message); }
+        finally { setPaying(false); }
+      };
+      return (
+        <>
+          <p className="pp-eyebrow"><span className="tick" />Klubben</p>
+          <h1 className="pp-h1">Kontingent</h1>
+          <ErrorBox msg={error} onRetry={reload} />
+          {loading ? <Spinner />
+            : !data?.due ? <Empty title="Intet aktivt kontingent" sub="Når kassereren opretter en periode, kan du betale her." />
+            : (
+              <>
+                <div className="pp-card">
+                  <div className="pp-row">
+                    <span className="pp-chip">{data.due.period}</span>
+                    <span className={`pp-chip ${data.my_paid ? "synced" : ""}`} style={!data.my_paid ? { color: "var(--danger)", borderColor: "#5a2727" } : undefined}>
+                      {data.my_paid ? "Betalt" : "Mangler"}
+                    </span>
+                  </div>
+                  <div className="pp-pts" style={{ fontSize: 34, marginTop: 12 }}>{fmtKr(data.due.amount_ore)}</div>
+                  {data.due.description && <div className="pp-muted" style={{ marginTop: 4 }}>{data.due.description}</div>}
+                  {!data.my_paid && (
+                    <div style={{ marginTop: 16, display: "grid", gap: 10 }}>
+                      {data.due.mobilepay_link && (
+                        <a className="pp-btn primary" style={{ textAlign: "center", textDecoration: "none", display: "block" }} href={data.due.mobilepay_link} target="_blank" rel="noreferrer">Betal med MobilePay</a>
+                      )}
+                      <button className="pp-btn ghost" disabled={paying} onClick={markPaid}>{paying ? "Registrerer…" : "Jeg har betalt"}</button>
+                    </div>
+                  )}
+                </div>
+                <p className="pp-eyebrow" style={{ marginTop: 22 }}><span className="tick" />Status</p>
+                {data.ledger?.map((p) => (
+                  <div className={`pp-rank ${p.is_me ? "me" : ""}`} key={p.player_id} style={{ marginBottom: 8 }}>
+                    <div className="grow"><div className="nm">{p.full_name}{p.is_me && <span className="pp-ball" />}</div></div>
+                    <span style={{ color: p.paid ? "var(--teal)" : "var(--muted)", fontWeight: 700, fontSize: 14 }}>{p.paid ? "✓ Betalt" : "Mangler"}</span>
+                  </div>
+                ))}
+              </>
+            )}
+        </>
+      );
+    }
+
+    /* ----------------------------------------------------- Profil */
+    function ProfileSheet({ me, onClose }) {
+      const sync = useLoad(api.syncStatus, []);
+      const syncTxt = useMemo(() => {
+        const s = sync.data;
+        if (sync.loading) return "henter…";
+        if (!s || s.status === "never_run") return "Aldrig kørt";
+        return s.ran_at ? `Sidst kørt ${fmtDateTime(s.ran_at)}` : s.status;
+      }, [sync]);
+      return (
+        <div className="pp-scrim" onClick={onClose}>
+          <div className="pp-sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="pp-handle" />
+            <div className="pp-title" style={{ fontSize: 22 }}>{me.full_name}{me.is_admin && <span className="pp-badge">Admin</span>}</div>
+            <div className="pp-muted" style={{ marginTop: 4 }}>{me.email}</div>
+            {me.rankedin_id && <div className="pp-muted" style={{ marginTop: 2 }}>RankedIn-id: {me.rankedin_id}</div>}
+            <div className="pp-stat">
+              <div><div className="v">{me.ranking_points ?? 0}</div><div className="l">Point</div></div>
+              <div><div className="v">{me.wins ?? 0}</div><div className="l">Sejre</div></div>
+              <div><div className="v">{me.losses ?? 0}</div><div className="l">Nederlag</div></div>
+            </div>
+            <div className="pp-muted" style={{ marginBottom: 16 }}>RankedIn-synk: {syncTxt}</div>
+            <button className="pp-btn ghost" onClick={() => supabase.auth.signOut()}>Log ud</button>
+          </div>
+        </div>
+      );
+    }
+
+    /* ----------------------------------------------------- Login */
+    function AuthScreen() {
+      const [mode, setMode] = useState("login");
+      const [f, setF] = useState({ email: "", password: "", full_name: "", invite_code: "", rankedin_id: "" });
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState(null);
+      const [info, setInfo] = useState(null);
+      const set = (k) => (e) => setF((s) => ({ ...s, [k]: e.target.value }));
+      const submit = async () => {
+        setErr(null); setInfo(null); setBusy(true);
+        try {
+          if (mode === "signup") {
+            if (!f.invite_code.trim()) throw new Error("Invitationskode mangler.");
+            await api.signup({ email: f.email.trim(), password: f.password, full_name: f.full_name.trim(), invite_code: f.invite_code.trim(), rankedin_id: f.rankedin_id.trim() || null });
+            const { error } = await supabase.auth.signInWithPassword({ email: f.email.trim(), password: f.password });
+            if (error) { setInfo("Konto oprettet — log ind herunder."); setMode("login"); }
+          } else {
+            const { error } = await supabase.auth.signInWithPassword({ email: f.email.trim(), password: f.password });
+            if (error) throw new Error(error.message === "Invalid login credentials" ? "Forkert e-mail eller adgangskode." : error.message);
+          }
+        } catch (e) { setErr(e.message); }
+        finally { setBusy(false); }
+      };
+      return (
+        <div className="pp-auth">
+          <div className="pp-mark" style={{ fontSize: 14, letterSpacing: ".22em", color: "var(--muted)" }}>KLUB-WEBSITE</div>
+          <h1 className="big">PADEL<span className="t">PIT</span> <span className="pp-ball" style={{ verticalAlign: "super" }} /></h1>
+          <div className="pp-court" />
+          <div className="pp-tabs">
+            <button className={mode === "login" ? "on" : ""} onClick={() => { setMode("login"); setErr(null); }}>Log ind</button>
+            <button className={mode === "signup" ? "on" : ""} onClick={() => { setMode("signup"); setErr(null); }}>Bliv medlem</button>
+          </div>
+          <ErrorBox msg={err} />
+          {info && <div className="pp-err" style={{ background: "rgba(27,183,158,.1)", borderColor: "var(--teal-deep)", color: "#9be8db" }}>{info}</div>}
+          {mode === "signup" && (
+            <>
+              <div className="pp-field"><label>Navn</label><input className="pp-input" value={f.full_name} onChange={set("full_name")} autoComplete="name" /></div>
+              <div className="pp-field"><label>Invitationskode</label><input className="pp-input" value={f.invite_code} onChange={set("invite_code")} placeholder="PIT-XXXX" /></div>
+              <div className="pp-field"><label>RankedIn-id (valgfrit)</label><input className="pp-input" value={f.rankedin_id} onChange={set("rankedin_id")} /></div>
+            </>
+          )}
+          <div className="pp-field"><label>E-mail</label><input className="pp-input" type="email" value={f.email} onChange={set("email")} autoComplete="email" inputMode="email" /></div>
+          <div className="pp-field"><label>Adgangskode</label><input className="pp-input" type="password" value={f.password} onChange={set("password")} autoComplete={mode === "login" ? "current-password" : "new-password"} /></div>
+          <button className="pp-btn primary" disabled={busy} onClick={submit} style={{ marginTop: 6 }}>
+            {busy ? "Et øjeblik…" : mode === "login" ? "Log ind" : "Opret konto"}
+          </button>
+          <p className="pp-muted" style={{ textAlign: "center", marginTop: 18 }}>Lukket klub — du skal bruge en invitationskode for at blive medlem.</p>
+        </div>
+      );
+    }
+
+    /* ----------------------------------------------------- Shell */
+    const TABS = [
+      { key: "events", label: "Events", ico: Ico.events },
+      { key: "rank", label: "Rangliste", ico: Ico.rank },
+      { key: "league", label: "Liga", ico: Ico.league },
+      { key: "dues", label: "Kontingent", ico: Ico.dues },
+    ];
+    function AppShell({ session }) {
+      const [tab, setTab] = useState("events");
+      const [showProfile, setShowProfile] = useState(false);
+      const meState = useLoad(api.me, [session?.user?.id]);
+      const me = meState.data;
+      const initials = useMemo(() => {
+        const n = me?.full_name || session?.user?.email || "?";
+        return n.split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase();
+      }, [me, session]);
+      if (meState.loading) return <Spinner />;
+      if (meState.error)
+        return (
+          <div className="pp-main">
+            <ErrorBox msg={meState.error} onRetry={meState.reload} />
+            <button className="pp-btn ghost" onClick={() => supabase.auth.signOut()}>Log ud</button>
+          </div>
+        );
+      return (
+        <>
+          <div className="pp-top">
+            <div className="pp-mark">PADEL<span className="t">PIT</span><span className="pp-ball" /></div>
+            <button className="pp-avatar" onClick={() => setShowProfile(true)} aria-label="Min profil">{initials}</button>
+          </div>
+          <main className="pp-main">
+            {tab === "events" && <EventsView me={me} />}
+            {tab === "rank" && <RankingsView />}
+            {tab === "league" && <LeagueView />}
+            {tab === "dues" && <DuesView />}
+          </main>
+          <nav className="pp-nav">
+            {TABS.map((t) => {
+              const I = t.ico;
+              return (
+                <button key={t.key} className={tab === t.key ? "on" : ""} onClick={() => setTab(t.key)}>
+                  {tab === t.key && <span className="dot" />}<I />{t.label}
+                </button>
+              );
+            })}
+          </nav>
+          {showProfile && me && <ProfileSheet me={me} onClose={() => setShowProfile(false)} />}
+        </>
+      );
+    }
+
+    /* ----------------------------------------------------- Root */
+    function PadelpitApp() {
+      const [session, setSession] = useState(undefined);
+      useEffect(() => {
+        if (!supabase) return;
+        supabase.auth.getSession().then(({ data }) => setSession(data.session));
+        const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => setSession(s));
+        return () => sub.subscription.unsubscribe();
+      }, []);
+      let body;
+      if (!supabase) {
+        body = (
+          <div className="pp-auth">
+            <h1 className="big">PADEL<span className="t">PIT</span></h1>
+            <div className="pp-court" />
+            <div className="pp-err">Mangler konfiguration. Indsæt din <b>anon-key</b> i <b>CONFIG.SUPABASE_ANON_KEY</b> øverst i index.html.</div>
+          </div>
+        );
+      } else if (session === undefined) body = <Spinner />;
+      else if (!session) body = <AuthScreen />;
+      else body = <AppShell session={session} />;
+      return (<div className="pp-root"><style>{CSS}</style><div className="pp-shell">{body}</div></div>);
+    }
+
+    document.getElementById("boot")?.remove();
+    createRoot(document.getElementById("root")).render(<PadelpitApp />);
+  </script>
+</body>
+</html>
